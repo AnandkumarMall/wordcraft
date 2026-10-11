@@ -457,11 +457,18 @@ fn del_col(s: &mut Session, _: &Value) -> CmdResult {
     let (tp, r, c) = cell(s)?;
     let story = s.sel.focus.story;
     let t = s.doc.table_mut(story, &tp)?;
-    if t.grid.len() <= 1 {
+    let cells = selected_cells(s);
+    let cols: std::collections::BTreeSet<usize> = if cells.is_empty() {
+        std::collections::BTreeSet::from([t.grid_col(r, c)])
+    } else {
+        cells.into_iter().map(|(cr, cc)| t.grid_col(cr, cc)).collect()
+    };
+    if cols.len() >= t.grid.len() {
         return del_table(s, &Value::Null);
     }
-    let g = t.grid_col(r, c);
-    t.delete_col(g);
+    for g in cols.iter().rev() {
+        t.delete_col(*g);
+    }
     // Rows left without cells are dropped; if that was every row, no table is left.
     if t.rows.is_empty() {
         return del_table(s, &Value::Null);
