@@ -1217,8 +1217,23 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                     }
                 }
                 if ui.button(tl!("Find Next")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    let _ = app.session.run("edit.find", &opts);
-                    match app.run("edit.findNext", json!({})) {
+                    let changed = app.session.find.query != *query
+                        || app.session.find.match_case != *match_case
+                        || app.session.find.whole_word != *whole_word
+                        || app.session.find.regex != *regex;
+                    let res = if changed || app.session.find.results.is_empty() {
+                        let _ = app.session.run("edit.find", &opts);
+                        let idx = app.session.find.current;
+                        let count = app.session.find.results.len();
+                        if count > 0 {
+                            Ok(json!({"index": idx, "count": count}))
+                        } else {
+                            Err(tl!("No matches found."))
+                        }
+                    } else {
+                        app.run("edit.findNext", json!({}))
+                    };
+                    match res {
                         Ok(r) => *message = format!("Match {} of {}", r["index"].as_u64().unwrap_or(0) + 1, r["count"]),
                         Err(e) => *message = e,
                     }
