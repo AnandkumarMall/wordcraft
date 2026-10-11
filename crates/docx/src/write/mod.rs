@@ -95,6 +95,8 @@ pub(crate) struct Writer<'d> {
     boxes: wordcraft_doc::BoxBudget,
     /// Charts, diagrams and OLE objects kept from a file: the parts they need.
     embeds: embed::EmbedWriter<'d>,
+    /// Whether any field had an empty cached result, requiring Word to evaluate fields on open.
+    has_empty_fields: bool,
 }
 
 const CT_WML: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.";
@@ -137,6 +139,7 @@ pub fn write_as(doc: &Document, flavor: Flavor) -> Result<Vec<u8>, DocxError> {
         used_media: Default::default(),
         boxes: wordcraft_doc::BoxBudget::default(),
         embeds: embed::EmbedWriter::new(doc),
+        has_empty_fields: false,
     };
     wr.assign_media();
     wr.embeds.reserve_media(wr.media_files.values());
@@ -301,7 +304,7 @@ pub fn write_as(doc: &Document, flavor: Flavor) -> Result<Vec<u8>, DocxError> {
         &mut entries,
         &mut overrides,
         "word/settings.xml",
-        settings_xml(doc, !wr.footnotes.is_empty(), !wr.endnotes.is_empty()),
+        settings_xml(doc, !wr.footnotes.is_empty(), !wr.endnotes.is_empty(), wr.has_empty_fields),
         &format!("{CT_WML}settings+xml"),
         PartRels::default(),
     );
@@ -314,6 +317,26 @@ pub fn write_as(doc: &Document, flavor: Flavor) -> Result<Vec<u8>, DocxError> {
         "application/vnd.openxmlformats-officedocument.theme+xml",
         PartRels::default(),
     );
+
+    // Scan wr.embeds.parts (DrawingML, SmartArt, charts) for media references so they are not pruned.
+    for (_, bytes, _, prels) in &wr.embeds.parts {
+        for (_, _kind, target, _) in &prels.list {
+            let target_filename = target.rsplit('/').next().unwrap_or(target);
+            for (key, file) in &wr.media_files {
+                if file.eq_ignore_ascii_case(target_filename) || key.eq_ignore_ascii_case(target_filename) {
+                    wr.used_media.insert(key.clone());
+                }
+            }
+        }
+        for (key, file) in &wr.media_files {
+            if !wr.used_media.contains(key) {
+                let file_bytes = file.as_bytes();
+                if bytes.windows(file_bytes.len()).any(|w| w == file_bytes) {
+                    wr.used_media.insert(key.clone());
+                }
+            }
+        }
+    }
 
     // Media referenced by some drawing (orphan parts would make the package suspect).
     let mut media_types: BTreeMap<String, &str> = BTreeMap::new();
@@ -780,12 +803,15 @@ fn write_level(w: &mut W, i: usize, l: &Level) {
     w.close("w:lvl");
 }
 
-fn settings_xml(doc: &Document, footnotes: bool, endnotes: bool) -> Vec<u8> {
+fn settings_xml(doc: &Document, footnotes: bool, endnotes: bool, update_fields: bool) -> Vec<u8> {
     let s = &doc.settings;
     let mut w = W::new();
     let ns = xml::body_ns();
     let ns_refs: Vec<(&str, &str)> = ns.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     w.open("w:settings", &ns_refs);
+    if update_fields {
+        w.val("w:updateFields", "true");
+    }
     w.empty("w:zoom", &[("w:percent", "100")]);
     if s.page_color.is_some() {
         w.empty("w:displayBackgroundShape", &[]);

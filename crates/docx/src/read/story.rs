@@ -473,10 +473,16 @@ impl Reader<'_> {
             "w:noBreakHyphen" => self.emit_text(sc, pb, "\u{2011}", props),
             "w:softHyphen" => self.emit_text(sc, pb, "\u{00AD}", props),
             "w:sym" => {
-                let ch = k.attr("w:char").and_then(|h| u32::from_str_radix(h.trim(), 16).ok()).and_then(char::from_u32).filter(|c| *c as u32 >= 0x20);
+                let code = k.attr("w:char").and_then(|h| u32::from_str_radix(h.trim(), 16).ok());
+                let font = k.attr("w:font").filter(|f| !f.is_empty());
+                let mapped = match (font, code) {
+                    (Some(f), Some(c)) => map_sym_char(f, c),
+                    _ => None,
+                };
+                let ch = mapped.or_else(|| code.and_then(char::from_u32)).filter(|c| *c as u32 >= 0x20);
                 if let Some(ch) = ch {
                     let mut p = props.clone();
-                    if let Some(f) = k.attr("w:font").filter(|f| !f.is_empty()) {
+                    if let Some(f) = font {
                         p.font = Some(f.to_string());
                     }
                     self.emit_text(sc, pb, &ch.to_string(), &p);
@@ -625,15 +631,24 @@ impl Reader<'_> {
         self.emit_obj(sc, pb, obj, &f.props);
     }
 
-    /// At a paragraph end, open fields can't keep buffering: emit them (empty result) and
-    /// let the rest of their result flow as ordinary text.
+    /// At a paragraph end, open fields can't keep buffering: emit them (keeping any cached
+    /// text evaluated so far) and let the rest of their result flow as ordinary text.
     fn spill_fields(&mut self, sc: &mut StoryCtx, pb: &mut PB) {
         for f in sc.fields.iter_mut() {
             if f.spilled || f.range {
                 continue;
             }
             f.spilled = true;
-            pb.push_obj(InlineObject::Field { instr: f.instr.trim().to_string(), result: String::new(), locked: f.locked }, &f.props);
+            let cached_text: String = f
+                .buf
+                .iter()
+                .filter_map(|(it, _)| match it {
+                    Item::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let result = if !cached_text.is_empty() { cached_text } else { String::new() };
+            pb.push_obj(InlineObject::Field { instr: f.instr.trim().to_string(), result, locked: f.locked }, &f.props);
             for (it, p) in f.buf.drain(..) {
                 match it {
                     Item::Text(t) => pb.push_text(&t, &p),
@@ -1246,5 +1261,62 @@ fn group_xfrm(sppr: Option<&El>) -> Xfrm {
         ext: pos(pair("a:ext", "cx", "cy", max)).unwrap_or((0.0, 0.0)),
         ch_off: pair("a:chOff", "x", "y", max),
         ch_ext: pos(pair("a:chExt", "cx", "cy", max)),
+    }
+}
+
+fn map_sym_char(font: &str, code: u32) -> Option<char> {
+    let byte = (code & 0xFF) as u8;
+    let f = font.to_ascii_lowercase();
+    if f.contains("wingdings") {
+        match byte {
+            0x6C => Some('\u{25CF}'),
+            0x6E => Some('\u{25A0}'),
+            0x71 => Some('\u{2708}'),
+            0x75 => Some('\u{25C6}'),
+            0x76 => Some('\u{2756}'),
+            0x77 => Some('\u{2727}'),
+            0xA7 => Some('\u{25AA}'),
+            0xA8 => Some('\u{25AB}'),
+            0xB7 => Some('\u{2022}'),
+            0xDC => Some('\u{27A4}'),
+            0xD8 => Some('\u{27A2}'),
+            0xE0 => Some('\u{21E6}'),
+            0xE1 => Some('\u{21E8}'),
+            0xE8 => Some('\u{2190}'),
+            0xE9 => Some('\u{2192}'),
+            0xFC => Some('\u{2713}'),
+            0xFD => Some('\u{2717}'),
+            0xFE => Some('\u{2611}'),
+            _ => None,
+        }
+    } else if f.contains("symbol") {
+        match byte {
+            0x22 => Some('\u{2200}'),
+            0x24 => Some('\u{2203}'),
+            0x41..=0x5A => char::from_u32(0x0391 + (byte - 0x41) as u32),
+            0x61..=0x7A => char::from_u32(0x03B1 + (byte - 0x61) as u32),
+            0xA5 => Some('\u{221E}'),
+            0xA9 => Some('\u{2264}'),
+            0xB1 => Some('\u{00B1}'),
+            0xB7 => Some('\u{2022}'),
+            0xB9 => Some('\u{2265}'),
+            0xBC => Some('\u{2261}'),
+            0xD7 => Some('\u{00D7}'),
+            0xF7 => Some('\u{00F7}'),
+            0xAC => Some('\u{2190}'),
+            0xAD => Some('\u{2191}'),
+            0xAE => Some('\u{2192}'),
+            0xAF => Some('\u{2193}'),
+            _ => None,
+        }
+    } else if f.contains("webdings") {
+        match byte {
+            0x69 => Some('\u{25CF}'),
+            0x67 => Some('\u{25A0}'),
+            0x61 => Some('\u{2713}'),
+            _ => None,
+        }
+    } else {
+        None
     }
 }

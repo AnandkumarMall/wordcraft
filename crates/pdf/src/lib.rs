@@ -39,7 +39,7 @@ use krilla::outline::{Outline, OutlineNode};
 use krilla::page::PageSettings;
 use krilla::paint::{Fill, FillRule, LineCap, LineJoin, Stroke, StrokeDash};
 use krilla::surface::Surface;
-use krilla::tagging::{Artifact, ArtifactType, ContentTag, Identifier, Node, SpanTag, Tag, TagGroup, TagKind, TagTree};
+use krilla::tagging::{Artifact, ArtifactType, ContentTag, Identifier, Node, SpanTag, TableHeaderScope, Tag, TagGroup, TagKind, TagTree};
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use wordcraft_doc::graphic::GraphicKind;
 use wordcraft_doc::para::{InlineObject, ShapeKind};
@@ -115,15 +115,15 @@ pub fn export_layout(doc: &Document, lay: &DocLayout, opts: &PdfOptions) -> Resu
         match write(doc, lay, opts, &pages, &outlined)? {
             Attempt::Done(bytes) => return Ok(bytes),
             Attempt::BadFont(id, msg) if outlined.len() < MAX_OUTLINED_FONTS && outlined.insert(id) => {
-                log::warn!("PDF: {msg}; its text is drawn as outlines");
+                log::warn!("PDF: {msg}; its text is drawn as outlines (outline limit: {MAX_OUTLINED_FONTS})");
             }
-            Attempt::BadFont(_, msg) => return Err(PdfError::Write(msg)),
+            Attempt::BadFont(_, msg) => return Err(PdfError::Write(format!("{msg} (exceeded maximum outlined fallback fonts: {MAX_OUTLINED_FONTS})"))),
         }
     }
 }
 
-/// How many unsubsettable fonts we fall back to outlines for before giving up.
-const MAX_OUTLINED_FONTS: usize = 32;
+/// How many unsubsettable fonts we fall back to outlines for before giving up (capped to prevent PDF bloat).
+const MAX_OUTLINED_FONTS: usize = 4;
 
 /// One try at writing the PDF.
 enum Attempt {
@@ -692,12 +692,25 @@ impl Exporter<'_> {
         if let Some(i) = self.tag_index.get(&(story, path.clone())) {
             return *i;
         }
-        let kind: TagKind = match self.doc.para(story, path).map(|p| self.doc.styles.resolve_para(&p.props).outline_level) {
-            Some(Some(l)) if l < 6 => {
-                let title = self.doc.para(story, path).map(|p| self.title_text(p, pl).trim().chars().take(200).collect::<String>());
-                Tag::Hn(NonZeroU16::new(u16::from(l) + 1).unwrap_or(NonZeroU16::MIN), title).into()
+        let kind: TagKind = if let Some((tbl_path, row_idx, _col_idx)) = path.cell() {
+            let is_header = self
+                .doc
+                .table(story, &tbl_path)
+                .and_then(|t| t.rows.get(row_idx))
+                .is_some_and(|r| r.props.header || row_idx == 0);
+            if is_header {
+                Tag::TH(TableHeaderScope::Column).into()
+            } else {
+                Tag::TD.into()
             }
-            _ => Tag::P.into(),
+        } else {
+            match self.doc.para(story, path).map(|p| self.doc.styles.resolve_para(&p.props).outline_level) {
+                Some(Some(l)) if l < 6 => {
+                    let title = self.doc.para(story, path).map(|p| self.title_text(p, pl).trim().chars().take(200).collect::<String>());
+                    Tag::Hn(NonZeroU16::new(u16::from(l) + 1).unwrap_or(NonZeroU16::MIN), title).into()
+                }
+                _ => Tag::P.into(),
+            }
         };
         self.tags.push(TagEntry { kind, children: Vec::new() });
         let i = self.tags.len() - 1;

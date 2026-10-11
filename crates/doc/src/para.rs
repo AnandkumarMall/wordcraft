@@ -606,13 +606,30 @@ impl Paragraph {
         Ok(())
     }
 
-    /// Clamp `off` to the text and back to a char boundary.
+    /// Clamp `off` to the text and snap to a valid extended grapheme cluster boundary.
     pub fn clamp(&self, off: usize) -> usize {
-        let mut o = off.min(self.text.len());
+        use unicode_segmentation::UnicodeSegmentation;
+        if self.text.is_empty() || off == 0 {
+            return 0;
+        }
+        if off >= self.text.len() {
+            return self.text.len();
+        }
+        let mut o = off;
         while o > 0 && !self.text.is_char_boundary(o) {
             o -= 1;
         }
-        o
+        let mut prev = 0;
+        for (idx, _) in self.text.grapheme_indices(true) {
+            if idx == o {
+                return idx;
+            }
+            if idx > o {
+                return if o - prev <= idx - o { prev } else { idx };
+            }
+            prev = idx;
+        }
+        self.text.len()
     }
 
     /// Index of the run containing byte `off` and the offset where that run starts. At a run
@@ -1125,6 +1142,21 @@ mod tests {
         assert_eq!(p.sentence_at(3), (0, 21));
         assert_eq!(p.next_boundary(0), 1);
         assert_eq!(p.prev_boundary(0), 0);
+    }
+
+    #[test]
+    fn clamp_graphemes() {
+        // "e\u{0301}" is a single grapheme cluster: 'e' (1 byte) + acute accent (2 bytes) = 3 bytes total
+        let p = Paragraph::with_text("e\u{0301}b", CharProps::default());
+        assert_eq!(p.text.len(), 4);
+        assert_eq!(p.clamp(0), 0);
+        // Clamping offset 1 (inside combining character) snaps to boundary 0
+        assert_eq!(p.clamp(1), 0);
+        // Clamping offset 2 (nearer to end of grapheme) snaps to boundary 3
+        assert_eq!(p.clamp(2), 3);
+        assert_eq!(p.clamp(3), 3);
+        assert_eq!(p.clamp(4), 4);
+        assert_eq!(p.clamp(99), 4);
     }
 
     proptest::proptest! {

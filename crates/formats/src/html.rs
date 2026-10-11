@@ -1143,6 +1143,25 @@ pub fn esc(s: &str) -> String {
     o
 }
 
+/// Return `Some(escaped_href)` only when `url` has a safe scheme, `None` otherwise.
+///
+/// HTML-entity escaping (`esc`) does not neutralise a `javascript:` scheme when
+/// placed inside an `href` attribute — the browser executes it regardless of
+/// entity encoding. We therefore validate the scheme before emitting any href.
+fn safe_href(url: &str) -> Option<String> {
+    // Strip leading ASCII whitespace the way browsers do.
+    let trimmed = url.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\x00');
+    // Pull out the scheme: everything before the first `:`, if it contains no
+    // path separators (per RFC 3986 the scheme is `[a-zA-Z][a-zA-Z0-9+\-.]*`).
+    let scheme = trimmed
+        .split_once(':')
+        .map(|(s, _)| s)
+        .unwrap_or("") // relative URL – no scheme
+        .to_ascii_lowercase();
+    let allowed = matches!(scheme.as_str(), "https" | "http" | "mailto" | "tel" | "ftp" | "");
+    if allowed { Some(esc(trimmed)) } else { None }
+}
+
 fn align_css(a: Option<Align>) -> Option<&'static str> {
     match a? {
         Align::Center => Some("text-align:center"),
@@ -1181,8 +1200,16 @@ pub fn inlines_html(inlines: &[Inline]) -> String {
                 let mut open = String::new();
                 let mut close: Vec<&str> = Vec::new();
                 if let Some(l) = &f.link {
-                    open.push_str(&format!("<a href=\"{}\">", esc(l)));
-                    close.push("</a>");
+                    // Only emit the href when the URL scheme is safe; a bare
+                    // `esc()` does not block `javascript:` in an href context.
+                    if let Some(href) = safe_href(l) {
+                        open.push_str(&format!("<a href=\"{}\">", href));
+                        close.push("</a>");
+                    } else {
+                        // Render the link text without making it clickable.
+                        open.push_str("<span>");
+                        close.push("</span>");
+                    }
                 }
                 let mut tag = |o: &str, c: &'static str| {
                     open.push_str(o);
@@ -1535,5 +1562,81 @@ mod tests {
     #[test]
     fn entities() {
         assert_eq!(unescape("a &lt;b&gt; &#65;&#x42; &bogus; &"), "a <b> AB &bogus; &");
+    }
+
+    // --- safe_href tests (WC-SEC-02 regression) ---
+
+    #[test]
+    fn safe_href_allows_https() {
+        assert!(safe_href("https://example.com/path?q=1#sec").is_some());
+    }
+
+    #[test]
+    fn safe_href_allows_http() {
+        assert!(safe_href("http://example.com").is_some());
+    }
+
+    #[test]
+    fn safe_href_allows_mailto() {
+        assert!(safe_href("mailto:user@example.com").is_some());
+    }
+
+    #[test]
+    fn safe_href_allows_tel() {
+        assert!(safe_href("tel:+1-800-555-0100").is_some());
+    }
+
+    #[test]
+    fn safe_href_allows_relative() {
+        assert!(safe_href("../images/photo.png").is_some());
+        assert!(safe_href("page.html").is_some());
+    }
+
+    #[test]
+    fn safe_href_allows_fragment() {
+        assert!(safe_href("#section-1").is_some());
+    }
+
+    #[test]
+    fn safe_href_blocks_javascript() {
+        assert!(safe_href("javascript:alert(1)").is_none());
+        // Leading whitespace trick browsers use to execute js: scheme
+        assert!(safe_href("  javascript:alert(1)").is_none());
+        assert!(safe_href("\x00javascript:alert(1)").is_none());
+    }
+
+    #[test]
+    fn safe_href_blocks_data() {
+        assert!(safe_href("data:text/html,<script>alert(1)</script>").is_none());
+    }
+
+    #[test]
+    fn safe_href_blocks_vbscript() {
+        assert!(safe_href("vbscript:MsgBox(1)").is_none());
+    }
+
+    #[test]
+    fn safe_href_escapes_special_chars() {
+        // A safe URL still has its HTML-special chars escaped.
+        let href = safe_href("https://example.com/?a=1&b=2").unwrap();
+        assert!(href.contains("&amp;"), "ampersand must be escaped: {href}");
+        assert!(!href.contains("javascript"), "must not contain dangerous scheme: {href}");
+    }
+
+    /// Regression: exporting a document whose hyperlink URL is `javascript:` must not
+    /// produce a clickable `<a href="javascript:…">` in the HTML output.
+    #[test]
+    fn export_javascript_link_is_not_clickable() {
+        use crate::model::{Fmt, Inline};
+        let inlines = vec![Inline::Text(
+            "click me".into(),
+            Fmt { link: Some("javascript:alert(document.cookie)".into()), ..Default::default() },
+        )];
+        let html = inlines_html(&inlines);
+        // Must NOT contain a href pointing to the dangerous scheme.
+        assert!(!html.contains("href=\"javascript:"), "XSS link must not appear in output: {html}");
+        assert!(!html.contains("href='javascript:"), "XSS link must not appear in output: {html}");
+        // The text itself must still appear.
+        assert!(html.contains("click me"), "link text must be preserved: {html}");
     }
 }

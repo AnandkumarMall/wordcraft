@@ -229,13 +229,40 @@ fn download(path: &str, bytes: &[u8]) -> Result<(), String> {
 /// The hidden iframe the last print loaded its PDF into.
 const PRINT_FRAME_ID: &str = "wordcraft-print-frame";
 
+/// Cooperatively yields control back to the browser's event loop via setTimeout(0)
+/// so that UI repaints, input dispatch, and frame rendering are never blocked.
+async fn yield_event_loop() {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(w) = web_sys::window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0);
+        } else {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
 /// Opens `bytes` (a PDF) as an object URL in a hidden iframe and calls the
 /// iframe's own `print()` once it has finished loading — this is the
 /// standard way to drive the browser's native print dialog on a PDF without
 /// a download or a popup window the browser might block. The previous
 /// print's iframe and object URL are removed first, so only one copy of the
 /// document's PDF stays in the page (the last one may still be printing).
+/// Executed asynchronously via `spawn_local` and cooperative event-loop yielding
+/// so the main browser thread and egui UI frame are not blocked by large PDF payloads.
 fn print_pdf(bytes: &[u8]) -> Result<(), String> {
+    let bytes = bytes.to_vec();
+    wasm_bindgen_futures::spawn_local(async move {
+        // Yield to the browser event loop first so pending UI repaints and status updates occur
+        yield_event_loop().await;
+        if let Err(e) = print_pdf_async(&bytes) {
+            log::error!("print failed: {e}");
+        }
+    });
+    Ok(())
+}
+
+fn print_pdf_async(bytes: &[u8]) -> Result<(), String> {
     let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
     let window = web_sys::window().ok_or("no window")?;
     let document = window.document().ok_or("no document")?;

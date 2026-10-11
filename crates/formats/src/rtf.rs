@@ -22,8 +22,8 @@ use crate::txt::cp1252;
 
 /// Deepest group nesting we track; deeper groups share the innermost state.
 const MAX_GROUPS: usize = 512;
-/// Largest picture we decode (bytes).
-const MAX_PICT: usize = 64 << 20;
+/// Largest picture we decode (bytes): 16MB bounds memory accumulation per image.
+const MAX_PICT: usize = 16 << 20;
 
 // ---------------------------------------------------------------------------------------------
 // Export
@@ -713,6 +713,10 @@ impl Reader {
                 }
             }
             Dest::Pict => {
+                let est_bytes = (s.len() / 2).min(MAX_PICT.saturating_sub(self.pict_hex.len()));
+                if est_bytes > 0 {
+                    self.pict_hex.reserve(est_bytes);
+                }
                 for b in s.bytes() {
                     let v = match b {
                         b'0'..=b'9' => b - b'0',

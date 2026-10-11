@@ -597,6 +597,8 @@ impl Writer<'_> {
                 }
                 flush(w, &mut buf);
             });
+        } else {
+            self.has_empty_fields = true;
         }
         run(w, &|w| w.empty("w:fldChar", &[("w:fldCharType", "end")]));
         self.rev_close(w, props);

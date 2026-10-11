@@ -37,6 +37,21 @@ pub fn has_rtl(text: &str) -> bool {
     text.chars().any(is_rtl_script)
 }
 
+/// According to UAX #9 rules P2 and P3: find the first character in `text` with strong
+/// directional property. Returns `Some(true)` if the first strong character is RTL,
+/// `Some(false)` if it is LTR, or `None` if text contains no strong directional characters.
+pub fn first_strong_rtl(text: &str) -> Option<bool> {
+    for c in text.chars() {
+        if is_rtl_script(c) {
+            return Some(true);
+        }
+        if c.is_alphabetic() {
+            return Some(false);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +71,8 @@ mod tests {
         assert!("می‌خواهم".chars().all(is_word_char), "ZWNJ is inside the word");
         assert!("کِتاب".chars().all(is_word_char), "so are harakat");
         assert!(!is_word_char(' ') && !is_word_char('،'));
+        assert_eq!(first_strong_rtl("سلام world"), Some(true));
+        assert_eq!(first_strong_rtl("Hello سلام"), Some(false));
+        assert_eq!(first_strong_rtl("123 ..."), None);
     }
 }

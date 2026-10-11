@@ -18,6 +18,7 @@ mod table;
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::io::Write as _;
 use std::sync::Arc;
 
 use wordcraft_doc::numbering::{Counters, Level};
@@ -287,6 +288,7 @@ struct Key {
     notes: u64,
     excl: u64,
     eq: u32,
+    style: u64,
 }
 
 /// Memoised paragraph layouts.
@@ -320,9 +322,83 @@ fn hash_of<T: Hash>(t: &T) -> u64 {
     h.finish()
 }
 
-fn env_hash(doc: &Document, opts: &LayoutOptions) -> u64 {
-    let s = serde_json::to_string(&(&doc.styles, &doc.numbering, doc.settings.default_tab, &doc.settings.footnote_format)).unwrap_or_default();
-    hash_of(&(s, opts.show_hidden, opts.hide_deleted, opts.proofing, wordcraft_proof::user_dictionary().len(), doc.settings.auto_hyphenation))
+struct HasherWriter<'a, H>(&'a mut H);
+
+impl<H: Hasher> std::io::Write for HasherWriter<'_, H> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Global environment hash: options and document defaults that truly affect all paragraphs globally.
+/// Style and tab edits do NOT invalidate the entire cache; they are tracked per-paragraph in `Key::style`.
+fn global_env_hash(doc: &Document, opts: &LayoutOptions) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    opts.show_hidden.hash(&mut h);
+    opts.hide_deleted.hash(&mut h);
+    opts.proofing.hash(&mut h);
+    wordcraft_proof::user_dictionary().len().hash(&mut h);
+    doc.settings.auto_hyphenation.hash(&mut h);
+    let _ = serde_json::to_writer(
+        HasherWriter(&mut h),
+        &(&doc.styles.default_chr, &doc.styles.default_para, &doc.numbering, &doc.settings.footnote_format),
+    );
+    h.finish()
+}
+
+/// Compute resolved fingerprints for all styles in the document stylesheet.
+fn compute_style_hashes<'a>(styles: &'a wordcraft_doc::StyleSheet) -> HashMap<&'a str, u64> {
+    let mut map: HashMap<&'a str, u64> = HashMap::with_capacity(styles.styles.len());
+    for st in &styles.styles {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        st.id.hash(&mut h);
+        st.name.hash(&mut h);
+        st.based_on.hash(&mut h);
+        let _ = serde_json::to_writer(HasherWriter(&mut h), &(&st.para, &st.chr, &st.table));
+        map.insert(st.id.as_str(), h.finish());
+    }
+    // Fold based_on inheritance so that if a base style changes, derived styles change too.
+    let mut resolved: HashMap<&'a str, u64> = HashMap::with_capacity(map.len());
+    for st in &styles.styles {
+        let mut combined = map.get(st.id.as_str()).copied().unwrap_or(0);
+        let mut curr = st.based_on.as_deref();
+        let mut depth = 0;
+        while let Some(parent) = curr {
+            if depth > 32 {
+                break;
+            }
+            if let Some(&ph) = map.get(parent) {
+                combined = combined.rotate_left(5) ^ ph;
+            }
+            curr = styles.styles.iter().find(|s| s.id == parent).and_then(|s| s.based_on.as_deref());
+            depth += 1;
+        }
+        resolved.insert(st.id.as_str(), combined);
+    }
+    resolved
+}
+
+/// Compute paragraph-specific style and tab fingerprint for granular cache invalidation.
+fn para_style_hash(p: &Paragraph, style_hashes: &HashMap<&str, u64>, default_tab: f32) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let p_style = p.props.style.as_deref().unwrap_or("Normal");
+    style_hashes.get(p_style).copied().unwrap_or(0).hash(&mut h);
+    if let Some(ms) = p.mark.style.as_deref() {
+        style_hashes.get(ms).copied().unwrap_or(0).hash(&mut h);
+    }
+    for r in &p.runs {
+        if let Some(cs) = r.props.style.as_deref() {
+            style_hashes.get(cs).copied().unwrap_or(0).hash(&mut h);
+        }
+    }
+    if p.text.contains('\t') || p.props.tabs.is_some() {
+        default_tab.to_bits().hash(&mut h);
+    }
+    h.finish()
 }
 
 fn has_page_fields(p: &Paragraph) -> bool {
@@ -347,6 +423,7 @@ struct Ctx<'a> {
     eq_count: u32,
     /// Bounds laying out text boxes inside text boxes, for the whole layout.
     boxes: wordcraft_doc::BoxBudget,
+    style_hashes: HashMap<&'a str, u64>,
 }
 
 impl Ctx<'_> {
@@ -407,6 +484,7 @@ impl Ctx<'_> {
             .sum();
         let eq_number = self.eq_count;
         self.eq_count = self.eq_count.saturating_add(eq_here);
+        let style = para_style_hash(p, &self.style_hashes, self.doc.settings.default_tab);
         let key = Key {
             rev: p.rev,
             width: width.to_bits(),
@@ -416,6 +494,7 @@ impl Ctx<'_> {
             notes: if p.objects.iter().any(|o| matches!(o, InlineObject::NoteRef { .. })) { self.notes_hash } else { 0 },
             excl: if exclusions.is_empty() { 0 } else { hash_of(&format!("{exclusions:?}")) },
             eq: if eq_here > 0 { eq_number } else { 0 },
+            style,
         };
         self.cache.used.insert(key.clone());
         if let Some(pl) = self.cache.paras.get(&key) {
@@ -1106,7 +1185,7 @@ impl PageBuilder<'_> {
 /// Lay out the whole document.
 pub fn layout(doc: &Document, cache: &mut LayoutCache, opts: &LayoutOptions) -> DocLayout {
     let t0 = now_ms();
-    let env = env_hash(doc, opts);
+    let env = global_env_hash(doc, opts);
     if env != cache.env {
         cache.paras.clear();
         cache.env = env;
@@ -1118,6 +1197,7 @@ pub fn layout(doc: &Document, cache: &mut LayoutCache, opts: &LayoutOptions) -> 
         v.sort();
         v
     });
+    let style_hashes = compute_style_hashes(&doc.styles);
     let mut ctx = Ctx {
         doc,
         cache,
@@ -1137,6 +1217,7 @@ pub fn layout(doc: &Document, cache: &mut LayoutCache, opts: &LayoutOptions) -> 
         numbers: HashMap::new(),
         eq_count: 0,
         boxes: wordcraft_doc::BoxBudget::default(),
+        style_hashes,
     };
     let sections = doc.sections();
     let web = opts.view != ViewMode::Print;

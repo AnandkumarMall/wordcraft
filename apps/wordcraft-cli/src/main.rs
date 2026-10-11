@@ -10,7 +10,7 @@ const USAGE: &str = "\
 wordcraft-cli — WordCraft from the command line
 
 USAGE:
-  wordcraft-cli convert <in> <out>            convert between formats (docx, doc [read], pdf, odt, rtf, html, md, tex, txt, json, png)
+  wordcraft-cli convert <in> <out> [--strict]  convert between formats (docx, doc [read], pdf, odt, rtf, html, md, tex, txt, json, png)
   wordcraft-cli info <file>                   pages, words, paragraphs, properties (JSON)
   wordcraft-cli text <file>                   plain text
   wordcraft-cli inspect <file>                document structure (JSON)
@@ -71,6 +71,7 @@ fn validate_options(command: &str, args: &[String], specs: &[OptionSpec]) -> Res
     Ok(())
 }
 
+const CONVERT_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--strict", takes_value: false }];
 const NO_OPTIONS: &[OptionSpec] = &[];
 const RENDER_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--page", takes_value: true }, OptionSpec { name: "--scale", takes_value: true }];
 const RUN_OPTIONS: &[OptionSpec] = &[
@@ -82,6 +83,7 @@ const RUN_OPTIONS: &[OptionSpec] = &[
     OptionSpec { name: "--scale", takes_value: true },
     OptionSpec { name: "--print", takes_value: false },
     OptionSpec { name: "--author", takes_value: true },
+    OptionSpec { name: "--strict", takes_value: false },
 ];
 const COMMANDS_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--json", takes_value: false }];
 const PARITY_OPTIONS: &[OptionSpec] = &[OptionSpec { name: "--markdown", takes_value: false }];
@@ -99,7 +101,8 @@ fn run(args: &[String]) -> Result<(), String> {
     let pos = |i: usize| rest.iter().filter(|a| !a.starts_with("--")).nth(i).cloned().ok_or_else(|| format!("missing argument\n\n{USAGE}"));
     match cmd {
         "convert" => {
-            validate_options("convert", &rest, NO_OPTIONS)?;
+            validate_options("convert", &rest, CONVERT_OPTIONS)?;
+            let strict = rest.iter().any(|a| a == "--strict");
             let (i, o) = (pos(0)?, pos(1)?);
             let mut s = open(&i)?;
             let r = if o.to_ascii_lowercase().ends_with(".png") {
@@ -109,6 +112,18 @@ fn run(args: &[String]) -> Result<(), String> {
             };
             r.map_err(|e| e.to_string())?;
             eprintln!("wrote {o}");
+            if strict {
+                if let Ok(rep) = s.run("review.checkAccessibility", &json!({})) {
+                    if let Some(issues) = rep.get("issues").and_then(Value::as_array) {
+                        let warnings: Vec<_> = issues.iter().filter(|i| {
+                            i.get("kind").and_then(Value::as_str).is_some_and(|k| k == "warning" || k == "error")
+                        }).collect();
+                        if !warnings.is_empty() {
+                            return Err(format!("conversion warnings detected in strict mode ({} issues)", warnings.len()));
+                        }
+                    }
+                }
+            }
             Ok(())
         }
         "info" => {
@@ -329,7 +344,11 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("wordcraft-cli: {e}");
-            ExitCode::FAILURE
+            if e.contains("strict mode") {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
@@ -344,6 +363,7 @@ mod tests {
 
     #[test]
     fn validators_accept_only_the_documented_options() {
+        assert!(validate_options("convert", &args(&["in.docx", "out.pdf", "--strict"]), CONVERT_OPTIONS).is_ok());
         assert!(validate_options("info", &args(&["file.docx"]), NO_OPTIONS).is_ok());
         assert!(validate_options("render", &args(&["in.docx", "out.png", "--page", "2", "--scale", "1.5"]), RENDER_OPTIONS).is_ok());
         assert!(validate_options("run", &args(&["--cmd", "text.insert={}", "--cmd", "edit.undo", "--print"]), RUN_OPTIONS).is_ok());

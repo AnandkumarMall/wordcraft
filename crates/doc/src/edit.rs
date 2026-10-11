@@ -2,7 +2,7 @@
 //! paragraphs and tables, apply character/paragraph formatting, copy a range to a fragment and
 //! paste a fragment.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -247,8 +247,9 @@ impl Document {
             return Ok(a);
         }
         // Different containers (range enters or leaves a table): clear text in every paragraph
-        // inside; remove whole tables that are entirely covered when at the same level as `a`.
+        // inside; remove whole tables that are entirely covered.
         let paths = self.paths_between(&a, &b);
+        let mut fully_covered_paras = HashSet::new();
         for p in paths.iter().rev() {
             let (from, to) = {
                 let Some(para) = self.para(a.story, p) else { continue };
@@ -256,22 +257,71 @@ impl Document {
                 let to = if *p == b.path { b.off } else { para.len() };
                 (from, to)
             };
+            if from == 0 && to == self.para(a.story, p).map_or(0, |para| para.len()) {
+                fully_covered_paras.insert(p.clone());
+            }
             self.para_mut(a.story, p)?.delete(from, to)?;
         }
-        // Drop top-level tables strictly between a and b at a's level.
-        if a.path.depth() == 0 && b.path.depth() > 0 {
-            let first_b = b.path.0.first().copied().unwrap_or(0) as usize;
-            let ia = a.path.last();
-            let bl = self.container_mut(a.story, &a.path)?;
-            let mut i = first_b;
-            while i > ia + 1 {
-                i -= 1;
+
+        // Identify any table whose every paragraph was fully covered by the deletion range.
+        let mut tables_to_remove = Vec::new();
+        let mut candidate_tables = HashSet::new();
+        for p in &paths {
+            if let Some((t_path, _, _)) = p.cell() {
+                candidate_tables.insert(t_path);
+            }
+        }
+        let top_a = a.path.0.first().copied().unwrap_or(0) as usize;
+        let top_b = b.path.0.first().copied().unwrap_or(0) as usize;
+        let (min_top, max_top) = (top_a.min(top_b), top_a.max(top_b));
+        if let Some(bl) = self.story(a.story) {
+            for i in (min_top + 1)..max_top {
                 if matches!(bl.get(i).map(|b| &**b), Some(Block::Table(_))) {
-                    bl.remove(i);
+                    candidate_tables.insert(Path::top(i));
                 }
             }
         }
-        Ok(a)
+
+        for t_path in candidate_tables {
+            if let Some(Block::Table(t)) = self.block(a.story, &t_path) {
+                let mut all_covered = true;
+                for (r_idx, row) in t.rows.iter().enumerate() {
+                    for (c_idx, cell) in row.cells.iter().enumerate() {
+                        for (b_idx, cb) in cell.blocks.iter().enumerate() {
+                            if let Block::Para(p) = &**cb {
+                                let mut full_p = t_path.0.clone();
+                                full_p.push(r_idx as u32);
+                                full_p.push(c_idx as u32);
+                                full_p.push(b_idx as u32);
+                                let cp = Path(full_p);
+                                if !p.is_empty() && !fully_covered_paras.contains(&cp) {
+                                    all_covered = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if !all_covered { break; }
+                    }
+                    if !all_covered { break; }
+                }
+                if all_covered {
+                    tables_to_remove.push(t_path);
+                }
+            }
+        }
+
+        tables_to_remove.sort_by(|x, y| y.cmp(x));
+        tables_to_remove.dedup();
+        for t_path in tables_to_remove {
+            let _ = self.remove_block(a.story, &t_path);
+        }
+        self.ensure_nonempty();
+        let ret_pos = if self.para(a.story, &a.path).is_some() {
+            a
+        } else {
+            self.clamp(&a)
+        };
+        Ok(ret_pos)
     }
 
     /// Apply `f` to the character formatting of `a..b`. A collapsed range changes nothing (the
@@ -478,7 +528,9 @@ impl Document {
             self.insert_block(pos.story, &left.with_last(idx), b)?;
             idx += 1;
         }
-        let right = after.path.with_last(idx);
+        let bl_len = self.container(pos.story, &left).map_or(0, |bl| bl.len());
+        let right_idx = idx.min(bl_len.saturating_sub(1));
+        let right = left.with_last(right_idx);
         match last {
             Some(Block::Para(p)) => {
                 let r = self.para_mut(pos.story, &right)?;
@@ -491,7 +543,13 @@ impl Document {
             }
             Some(t @ Block::Table(_)) => {
                 self.insert_block(pos.story, &right, t)?;
-                Ok(Pos { story: pos.story, path: right.with_last(idx + 1), off: 0 })
+                let new_len = self.container(pos.story, &left).map_or(0, |bl| bl.len());
+                let tail_idx = (right_idx + 1).min(new_len.saturating_sub(1));
+                let tail_path = left.with_last(tail_idx);
+                if self.para(pos.story, &tail_path).is_none() {
+                    let _ = self.insert_block(pos.story, &left.with_last(new_len), Block::Para(Paragraph::new()));
+                }
+                Ok(Pos { story: pos.story, path: tail_path, off: 0 })
             }
             None => Ok(Pos { story: pos.story, path: right, off: 0 }),
         }
@@ -721,5 +779,25 @@ mod tests {
         let c = d.clamp(&Pos::body(9, 9));
         assert_eq!(c, Pos::body(0, 2));
         assert!(d.delete_range(&Pos { story: StoryRef::Part(3), path: Path::top(0), off: 0 }, &Pos::body(0, 0)).is_err());
+    }
+
+    #[test]
+    fn delete_fully_covered_table_across_containers() {
+        let mut d = doc(&["before", "after"]);
+        d.insert_block(StoryRef::Body, &Path::top(1), Block::Table(Table::new(2, 2, 200.0))).unwrap();
+        assert_eq!(d.para_paths(StoryRef::Body).len(), 6);
+        let _ = d.delete_range(&Pos::body(0, 0), &Pos::body(2, 5)).unwrap();
+        assert_eq!(d.para_paths(StoryRef::Body).len(), 1);
+        assert_eq!(d.plain_text(StoryRef::Body), "");
+    }
+
+    #[test]
+    fn insert_fragment_into_table_cell() {
+        let mut d = doc(&["before"]);
+        d.insert_block(StoryRef::Body, &Path::top(1), Block::Table(Table::new(2, 2, 200.0))).unwrap();
+        let cell_pos = Pos { story: StoryRef::Body, path: Path(vec![1, 0, 0, 0]), off: 0 };
+        let frag = Fragment::from_text("first\nsecond\nthird");
+        let end = d.insert_fragment(&cell_pos, &frag).unwrap();
+        assert!(d.para(StoryRef::Body, &end.path).is_some());
     }
 }

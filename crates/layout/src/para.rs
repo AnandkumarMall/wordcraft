@@ -621,6 +621,9 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
     let para_style = p.props.style.as_deref();
     let table_chr = env.table.map(|t| &t.chr);
     let resolve = |c: &CharProps| -> Arc<ResolvedChar> { Arc::new(doc.styles.resolve_char_in(para_style, table_chr, c)) };
+    if p.props.bidi.is_none() && wordcraft_doc::bidi::first_strong_rtl(&p.text).unwrap_or(false) {
+        rp.bidi = true;
+    }
     let levels = bidi_levels(&p.text, rp.bidi);
     let mut b =
         Builder { env, styles: Vec::new(), style_index: Default::default(), glyphs: Vec::new(), clusters: Vec::new(), levels, shown: Vec::new() };

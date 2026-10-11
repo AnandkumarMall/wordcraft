@@ -656,6 +656,25 @@ fn cache_reuses_unchanged_paragraphs() {
 }
 
 #[test]
+fn style_edit_does_not_clear_unaffected_paragraphs() {
+    let d = Document::from_text(&"some normal text\n".repeat(50));
+    let mut c = LayoutCache::new();
+    layout(&d, &mut c, &LayoutOptions::default());
+    let misses = c.misses;
+    assert_eq!(misses, 50);
+
+    // Modify Heading 1, which none of the 50 normal paragraphs use
+    let mut d2 = d.clone();
+    let mut h1 = d2.styles.get("Heading1").cloned().unwrap_or_default();
+    h1.chr.size = Some(30.0);
+    d2.styles.upsert(h1);
+
+    layout(&d2, &mut c, &LayoutOptions::default());
+    // Unaffected Normal paragraphs should all be cache hits! Misses should not increase!
+    assert_eq!(c.misses, misses);
+}
+
+#[test]
 fn selection_rects_cover_range() {
     let d = Document::from_text("Hello world\nSecond line");
     let l = lay(&d);

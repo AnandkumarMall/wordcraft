@@ -146,7 +146,75 @@ pub fn tool_definitions() -> Value {
     ])
 }
 
-fn exec(b: &mut dyn Backend, id: &str, params: Value) -> Result<Value, String> {
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
+}
+
+fn get_workspace_root() -> Option<std::path::PathBuf> {
+    if let Ok(ws) = std::env::var("WORDCRAFT_WORKSPACE") {
+        if !ws.trim().is_empty() {
+            return Some(std::path::PathBuf::from(ws));
+        }
+    }
+    std::env::current_dir().ok()
+}
+
+pub fn sanitize_mcp_path(path: &str) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Err("path cannot be empty".to_string());
+    }
+    if path.contains('\0') {
+        return Err("path contains null byte".to_string());
+    }
+    let p = std::path::Path::new(path);
+    for c in p.components() {
+        if matches!(c, std::path::Component::ParentDir) {
+            return Err("path traversal ('..') is forbidden".to_string());
+        }
+    }
+    if let Some(root) = get_workspace_root() {
+        let norm_root = normalize_path(&root);
+        let candidate = if p.is_relative() {
+            norm_root.join(p)
+        } else {
+            normalize_path(p)
+        };
+        let norm_candidate = normalize_path(&candidate);
+        let is_inside = if cfg!(windows) {
+            let cand_s = norm_candidate.to_string_lossy().to_ascii_lowercase();
+            let root_s = norm_root.to_string_lossy().to_ascii_lowercase();
+            cand_s == root_s
+                || cand_s.starts_with(&format!("{root_s}\\"))
+                || cand_s.starts_with(&format!("{root_s}/"))
+                || norm_candidate.starts_with(&norm_root)
+        } else {
+            norm_candidate.starts_with(&norm_root)
+        };
+        if !is_inside {
+            return Err(format!("path '{path}' is outside allowed workspace '{}'", norm_root.display()));
+        }
+        return Ok(norm_candidate.to_string_lossy().to_string());
+    }
+    Ok(path.to_string())
+}
+
+fn exec(b: &mut dyn Backend, id: &str, mut params: Value) -> Result<Value, String> {
+    if matches!(id, "file.open" | "file.save" | "file.exportPng") {
+        if let Some(p) = params.get("path").and_then(Value::as_str) {
+            let clean = sanitize_mcp_path(p)?;
+            params["path"] = Value::String(clean);
+        }
+    }
     b.call("engine.execute", json!({"command": id, "params": params}))
 }
 
@@ -201,17 +269,30 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, a: &Value) -> ToolResult {
             ToolResult::json(&Value::Array(out))
         }
         "new_document" => wrap(exec(b, "file.new", json!({"template": st("template").unwrap_or("blank")}))),
-        "open_document" => wrap(exec(b, "file.open", json!({"path": st("path").unwrap_or("")}))),
+        "open_document" => {
+            let raw_path = st("path").unwrap_or("");
+            match sanitize_mcp_path(raw_path) {
+                Ok(clean) => wrap(exec(b, "file.open", json!({"path": clean}))),
+                Err(e) => ToolResult::error(format!("invalid file path: {e}")),
+            }
+        }
         "save_document" => {
             let p = st("path");
-            let ext = p.and_then(|x| x.rsplit('.').next()).unwrap_or("").to_ascii_lowercase();
+            let clean_p = match p {
+                Some(raw) => match sanitize_mcp_path(raw) {
+                    Ok(clean) => Some(clean),
+                    Err(e) => return ToolResult::error(format!("invalid file path: {e}")),
+                },
+                None => None,
+            };
+            let ext = clean_p.as_deref().and_then(|x| x.rsplit('.').next()).unwrap_or("").to_ascii_lowercase();
             if ext == "png" {
-                wrap(exec(b, "file.exportPng", json!({"path": p})))
+                wrap(exec(b, "file.exportPng", json!({"path": clean_p})))
             } else {
                 wrap(exec(
                     b,
                     "file.save",
-                    match p {
+                    match clean_p {
                         Some(p) => json!({"path": p}),
                         None => json!({}),
                     },
@@ -279,5 +360,25 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, a: &Value) -> ToolResult {
         "key" => wrap(b.call("ui.key", a.clone())),
         "ui_inspect" => wrap(b.call("ui.inspect", json!({}))),
         other => ToolResult::error(format!("unknown tool `{other}`")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_mcp_path_traversal() {
+        assert!(sanitize_mcp_path("../secret.txt").is_err());
+        assert!(sanitize_mcp_path("foo/../../bar").is_err());
+        assert!(sanitize_mcp_path("").is_err());
+        assert!(sanitize_mcp_path("  ").is_err());
+        assert!(sanitize_mcp_path("foo\0bar").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_mcp_path_valid() {
+        let res = sanitize_mcp_path("valid_doc.docx");
+        assert!(res.is_ok());
     }
 }

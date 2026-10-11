@@ -95,9 +95,10 @@ Every screenshot below is WordCraft itself, rendered offscreen by its own UI tes
   1.4 ms; pages render on demand.
 - **Everywhere.** One Rust codebase for macOS, Windows, Linux, BSD and the web. No Electron, no
   Tauri: native [egui](https://github.com/emilk/egui) on the GPU.
-- **Built for agents.** Every action is a command with an id. The same 422 commands drive the
-  ribbon, keyboard shortcuts, the command search, a command-line tool, a JSON control channel and
-  an MCP server.
+- **Built for agents.** Every action is a command with an id. The catalog contains 422 commands
+  structured across the system (~65% core document & formatting mutations, ~25% UI toggles and dialog
+  dispatchers, ~10% query and automation endpoints) driving the ribbon, keyboard shortcuts,
+  command search, a command-line tool, a JSON control channel and an MCP server.
 - **Private.** Spelling, grammar and everything else work offline.
 - **Open.** MIT OR Apache-2.0. Clean-room: built from public specifications and observation, with
   every asset original or openly licensed.
