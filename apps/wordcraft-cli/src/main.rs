@@ -114,19 +114,19 @@ fn run(args: &[String]) -> Result<(), String> {
         "info" => {
             validate_options("info", &rest, NO_OPTIONS)?;
             let mut s = open(&pos(0)?)?;
-            println!("{}", serde_json::to_string_pretty(&s.run("file.info", &json!({})).map_err(|e| e.to_string())?).unwrap_or_default());
+            write_stdout_line(&serde_json::to_string_pretty(&s.run("file.info", &json!({})).map_err(|e| e.to_string())?).unwrap_or_default())?;
             Ok(())
         }
         "text" => {
             validate_options("text", &rest, NO_OPTIONS)?;
             let s = open(&pos(0)?)?;
-            println!("{}", s.doc.plain_text(wordcraft_doc::StoryRef::Body));
+            write_stdout_line(&s.doc.plain_text(wordcraft_doc::StoryRef::Body))?;
             Ok(())
         }
         "inspect" => {
             validate_options("inspect", &rest, NO_OPTIONS)?;
             let mut s = open(&pos(0)?)?;
-            println!("{}", serde_json::to_string_pretty(&s.run("document.inspect", &json!({})).map_err(|e| e.to_string())?).unwrap_or_default());
+            write_stdout_line(&serde_json::to_string_pretty(&s.run("document.inspect", &json!({})).map_err(|e| e.to_string())?).unwrap_or_default())?;
             Ok(())
         }
         "render" => {
@@ -136,7 +136,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let page = arg_value(&rest, "--page").and_then(|p| p.parse::<u64>().ok()).unwrap_or(1);
             let scale = arg_value(&rest, "--scale").and_then(|p| p.parse::<f64>().ok()).unwrap_or(2.0);
             let r = s.run("file.exportPng", &json!({"path": o, "page": page, "scale": scale})).map_err(|e| e.to_string())?;
-            println!("{r}");
+            write_stdout_line(&r.to_string())?;
             Ok(())
         }
         "run" => {
@@ -163,7 +163,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     };
                     let r = s.run(&id, &params).map_err(|e| format!("{id}: {e}"))?;
                     if rest.iter().any(|a| a == "--print") {
-                        println!("{id}: {r}");
+                        write_stdout_line(&format!("{id}: {r}"))?;
                     }
                     i += 2;
                 } else {
@@ -192,10 +192,10 @@ fn run(args: &[String]) -> Result<(), String> {
             validate_options("commands", &rest, COMMANDS_OPTIONS)?;
             let s = Session::new(wordcraft_doc::Document::new());
             if rest.iter().any(|a| a == "--json") {
-                println!("{}", serde_json::to_string_pretty(&s.registry.describe()).unwrap_or_default());
+                write_stdout_line(&serde_json::to_string_pretty(&s.registry.describe()).unwrap_or_default())?;
             } else {
                 for c in s.registry.all() {
-                    println!("{:<32} {:<36} {:<24} {}", c.id, c.label, c.shortcut, c.location);
+                    write_stdout_line(&format!("{:<32} {:<36} {:<24} {}", c.id, c.label, c.shortcut, c.location))?;
                 }
             }
             Ok(())
@@ -205,9 +205,9 @@ fn run(args: &[String]) -> Result<(), String> {
             let s = Session::new(wordcraft_doc::Document::new());
             let p = wordcraft_engine::catalog::parity(&s.registry);
             if rest.iter().any(|a| a == "--markdown") {
-                print!("{}", parity_markdown(&p));
+                write_stdout(&parity_markdown(&p))?;
             } else {
-                println!("{}", serde_json::to_string_pretty(&p).unwrap_or_default());
+                write_stdout_line(&serde_json::to_string_pretty(&p).unwrap_or_default())?;
             }
             Ok(())
         }
@@ -278,11 +278,11 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "--version" | "-V" => {
-            println!("wordcraft-cli {}", env!("CARGO_PKG_VERSION"));
+            write_stdout_line(&format!("wordcraft-cli {}", env!("CARGO_PKG_VERSION")))?;
             Ok(())
         }
         "" | "help" | "--help" | "-h" => {
-            print!("{USAGE}");
+            write_stdout(USAGE)?;
             Ok(())
         }
         other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
@@ -321,6 +321,32 @@ fn parity_markdown(p: &Value) -> String {
         s += "\n";
     }
     s
+}
+
+fn write_stdout(s: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match out.write_all(s.as_bytes()) {
+        Ok(()) => {
+            let _ = out.flush();
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(format!("stdout: {e}")),
+    }
+}
+
+fn write_stdout_line(s: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match writeln!(out, "{s}") {
+        Ok(()) => {
+            let _ = out.flush();
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(format!("stdout: {e}")),
+    }
 }
 
 fn main() -> ExitCode {
