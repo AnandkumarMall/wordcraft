@@ -299,7 +299,11 @@ impl Document {
 
     /// Apply `f` to the paragraph properties of every paragraph touched by `a..b`.
     pub fn format_paragraphs(&mut self, a: &Pos, b: &Pos, f: &dyn Fn(&mut ParaProps)) -> Result<()> {
-        for p in self.paths_between(a, b) {
+        let (a, b) = order(a, b);
+        for p in self.paths_between(&a, &b) {
+            if a != b && p == b.path && b.off == 0 && b.path > a.path {
+                continue;
+            }
             let para = self.para_mut(a.story, &p)?;
             f(&mut para.props);
             para.touch();
