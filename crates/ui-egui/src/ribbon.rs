@@ -760,7 +760,7 @@ fn design(app: &mut WordApp, ui: &mut Ui) {
 }
 
 fn layout(app: &mut WordApp, ui: &mut Ui) {
-    group(ui, "Page Setup", Some("ui.dialog"), app, |ui, app| {
+    group(ui, "Page Setup", Some("layout.pageSetup"), app, |ui, app| {
         menu_button(ui, app, "margins", Some("Margins"), "Margins", true, |ui, app| {
             for (l, k) in [
                 ("Normal  1\" all", "normal"),
