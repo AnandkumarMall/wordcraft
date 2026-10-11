@@ -369,21 +369,73 @@ fn change_case(s: &mut Session, v: &Value) -> CmdResult {
             let to = if path == b.path { b.off } else { p.len() };
             (from, to, p.text.get(from..to).unwrap_or("").to_string())
         };
-        let new = convert(&src, &mode, from == 0);
-        if new.len() != src.len() {
-            // Lengths differ (ß → SS): replace text keeping the first run's formatting.
-            let para = s.doc.para_mut(a.story, &path)?;
-            let props = para.props_of_char(from).clone();
-            para.delete(from, to)?;
-            para.insert_text(from, &new, &props)?;
-        } else {
-            let para = s.doc.para_mut(a.story, &path)?;
-            if let Some(slice) = para.text.get(from..to)
-                && slice.len() == new.len()
-            {
-                para.text.replace_range(from..to, &new);
-                para.touch();
+        if from >= to {
+            continue;
+        }
+
+        let char_conversions = convert_char_by_char(&src, &mode, from == 0);
+        let new_text_total: String = char_conversions.iter().map(|(_, str_val)| str_val.as_str()).collect();
+        let delta = new_text_total.len() as isize - (to - from) as isize;
+
+        let para = s.doc.para_mut(a.story, &path)?;
+        let mut new_runs = Vec::with_capacity(para.runs.len() + 2);
+        let mut new_para_text = String::with_capacity((para.text.len() as isize + delta).max(0) as usize);
+        let mut start = 0;
+
+        for r in para.runs.drain(..) {
+            let (rs, re) = (start, start + r.len);
+            start = re;
+            let cut = [rs, from.clamp(rs, re), to.clamp(rs, re), re];
+            for w in cut.windows(2) {
+                let (x, y) = (w[0], w[1]);
+                if y <= x {
+                    continue;
+                }
+                if x >= from && y <= to {
+                    let rel_start = x - from;
+                    let rel_end = y - from;
+                    let run_converted: String = char_conversions
+                        .iter()
+                        .filter(|(c_off, _)| *c_off >= rel_start && *c_off < rel_end)
+                        .map(|(_, str_val)| str_val.as_str())
+                        .collect();
+                    new_para_text.push_str(&run_converted);
+                    new_runs.push(wordcraft_doc::Run { len: run_converted.len(), props: r.props.clone() });
+                } else {
+                    if let Some(slice) = para.text.get(x..y) {
+                        new_para_text.push_str(slice);
+                    }
+                    new_runs.push(wordcraft_doc::Run { len: y - x, props: r.props.clone() });
+                }
             }
+        }
+
+        para.text = new_para_text;
+        para.runs = new_runs;
+        para.normalize();
+        para.touch();
+
+        let remap_off = |off: usize| -> usize {
+            if off <= from {
+                off
+            } else if off >= to {
+                (off as isize + delta).max(0) as usize
+            } else {
+                let rel_off = off - from;
+                let converted_before: usize = char_conversions
+                    .iter()
+                    .take_while(|(c_off, _)| *c_off < rel_off)
+                    .map(|(_, str_val)| str_val.len())
+                    .sum();
+                from + converted_before
+            }
+        };
+
+        if s.sel.anchor.story == a.story && s.sel.anchor.path == path {
+            s.sel.anchor.off = remap_off(s.sel.anchor.off);
+        }
+        if s.sel.focus.story == a.story && s.sel.focus.path == path {
+            s.sel.focus.off = remap_off(s.sel.focus.off);
         }
     }
     sel_result(s)
@@ -393,41 +445,59 @@ fn is_title(t: &str) -> bool {
     t.split_whitespace().all(|w| w.chars().next().is_some_and(char::is_uppercase))
 }
 
-fn convert(src: &str, mode: &str, para_start: bool) -> String {
+fn convert_char_by_char(src: &str, mode: &str, para_start: bool) -> Vec<(usize, String)> {
     match mode {
-        "upper" => src.to_uppercase(),
-        "lower" => src.to_lowercase(),
-        "toggle" => src.chars().map(|c| if c.is_uppercase() { c.to_lowercase().collect::<String>() } else { c.to_uppercase().collect() }).collect(),
-        "title" => {
-            let mut out = String::with_capacity(src.len());
-            let mut up = true;
-            for c in src.chars() {
-                if up && c.is_alphabetic() {
-                    out.extend(c.to_uppercase());
-                    up = false;
+        "upper" => src
+            .char_indices()
+            .map(|(idx, c)| (idx, c.to_uppercase().to_string()))
+            .collect(),
+        "lower" => src
+            .char_indices()
+            .map(|(idx, c)| (idx, c.to_lowercase().to_string()))
+            .collect(),
+        "toggle" => src
+            .char_indices()
+            .map(|(idx, c)| {
+                let s = if c.is_uppercase() {
+                    c.to_lowercase().to_string()
                 } else {
-                    out.extend(c.to_lowercase());
-                }
+                    c.to_uppercase().to_string()
+                };
+                (idx, s)
+            })
+            .collect(),
+        "title" => {
+            let mut out = Vec::with_capacity(src.len());
+            let mut up = true;
+            for (idx, c) in src.char_indices() {
+                let s = if up && c.is_alphabetic() {
+                    up = false;
+                    c.to_uppercase().to_string()
+                } else {
+                    c.to_lowercase().to_string()
+                };
                 if c.is_whitespace() {
                     up = true;
                 }
+                out.push((idx, s));
             }
             out
         }
         _ => {
             // Sentence case.
-            let mut out = String::with_capacity(src.len());
+            let mut out = Vec::with_capacity(src.len());
             let mut up = para_start;
-            for c in src.chars() {
-                if up && c.is_alphabetic() {
-                    out.extend(c.to_uppercase());
+            for (idx, c) in src.char_indices() {
+                let s = if up && c.is_alphabetic() {
                     up = false;
+                    c.to_uppercase().to_string()
                 } else {
-                    out.extend(c.to_lowercase());
-                }
+                    c.to_lowercase().to_string()
+                };
                 if matches!(c, '.' | '!' | '?') {
                     up = true;
                 }
+                out.push((idx, s));
             }
             out
         }

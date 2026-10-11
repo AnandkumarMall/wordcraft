@@ -2732,3 +2732,28 @@ fn deleting_the_last_cell_column_never_leaves_a_table_without_rows() {
     run(&mut s, "edit.undo", json!({}));
     assert!(s.doc.body.iter().any(|b| b.as_table().is_some_and(|t| !t.rows.is_empty())));
 }
+
+/// #420 & #421: changeCase preserves multi-run formatting and updates selection when byte lengths change.
+#[test]
+fn change_case_preserves_multi_run_formatting_and_updates_selection() {
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text": "Hello "}));
+    run(&mut s, "format.bold", json!({"value": true}));
+    run(&mut s, "text.insert", json!({"text": "world"}));
+    run(&mut s, "select.all", json!({}));
+    run(&mut s, "format.changeCase", json!({"mode": "upper"}));
+    assert_eq!(text(&s), "HELLO WORLD");
+    let p = s.doc.para_at(&Pos::body(0, 0)).unwrap();
+    assert_ne!(p.props_of_char(0).bold, Some(true));
+    assert_eq!(p.props_of_char(6).bold, Some(true));
+
+    // Desync with byte-length change (e.g. ß -> SS)
+    let mut s2 = s();
+    run(&mut s2, "text.insert", json!({"text": "straße"}));
+    run(&mut s2, "select.all", json!({}));
+    assert_eq!(s2.sel.focus.off, 6);
+    run(&mut s2, "format.changeCase", json!({"mode": "upper"}));
+    assert_eq!(text(&s2), "STRASSE");
+    assert_eq!(s2.sel.focus.off, 7);
+}
+
