@@ -686,11 +686,11 @@ impl Dialog {
                 strike: b("strike"),
                 sup: b("superscript"),
                 sub: b("subscript"),
-                small_caps: false,
-                caps: false,
-                hidden: false,
+                small_caps: b("smallCaps"),
+                caps: b("caps"),
+                hidden: b("hidden"),
                 color: s("color"),
-                spacing: 0.0,
+                spacing: st.get("spacing").and_then(Value::as_f64).map(|v| v as f32).unwrap_or(0.0),
             },
             "paragraph" | "asianTypography" => {
                 let rp = app.session.doc.para_at(&app.session.sel.focus).map(|p| app.session.doc.styles.resolve_para(&p.props));
