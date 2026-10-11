@@ -943,7 +943,7 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
         .id(egui::Id::new(("dialog", title)))
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, -40.0))
+        .anchor(egui::Align2::CENTER_TOP, vec2(0.0, 100.0))
         .open(&mut open)
         .show(ctx, |ui| {
             ui.set_min_width(340.0);
