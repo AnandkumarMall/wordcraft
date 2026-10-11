@@ -51,6 +51,9 @@ pub fn specs() -> Vec<CommandSpec> {
         })
         .params(r#"{"path": string}"#)
         .pure(),
+        CommandSpec::new("file.export", "Export Copy", "File › Export", export)
+            .params(r#"{"path": string}"#)
+            .pure(),
         CommandSpec::new("file.exportPng", "Export Page as PNG", "File › Export", export_png)
             .params(r#"{"path": string, "page"?: n (1-based), "scale"?: px per pt}"#)
             .pure(),
@@ -194,6 +197,14 @@ fn save_as(s: &mut Session, v: &Value) -> CmdResult {
         return Ok(json!({"saved": false}));
     }
     save(s, v)
+}
+
+fn export(s: &mut Session, v: &Value) -> CmdResult {
+    let path = p::req_str(v, "path")?;
+    let path = std::path::Path::new(path);
+    let password = s.password.as_ref().map(crate::io::Password::as_str);
+    crate::io::save_path_with(path, &s.doc, password).map_err(CmdError::Failed)?;
+    Ok(json!({"path": path.to_string_lossy(), "exported": true}))
 }
 
 fn export_png(s: &mut Session, v: &Value) -> CmdResult {

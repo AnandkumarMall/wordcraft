@@ -2732,3 +2732,30 @@ fn deleting_the_last_cell_column_never_leaves_a_table_without_rows() {
     run(&mut s, "edit.undo", json!({}));
     assert!(s.doc.body.iter().any(|b| b.as_table().is_some_and(|t| !t.rows.is_empty())));
 }
+
+/// #168: exporting a copy in another format (DOCX, ODT, RTF, etc.) preserves the active document's
+/// path and dirty state.
+#[test]
+fn export_copy_preserves_path_and_dirty_state() {
+    let mut s = s();
+    let dir = std::env::temp_dir().join(format!("wordcraft-export-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let original = dir.join("original.docx");
+    let copy = dir.join("copy.odt");
+
+    run(&mut s, "text.insert", json!({"text": "Original"}));
+    run(&mut s, "file.save", json!({"path": original.to_string_lossy()}));
+    assert_eq!(s.path.as_ref(), Some(&original));
+    assert!(!s.dirty);
+
+    run(&mut s, "text.insert", json!({"text": " edited"}));
+    assert!(s.dirty);
+
+    run(&mut s, "file.export", json!({"path": copy.to_string_lossy()}));
+    // Active path and dirty flag remain untouched
+    assert_eq!(s.path.as_ref(), Some(&original));
+    assert!(s.dirty);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

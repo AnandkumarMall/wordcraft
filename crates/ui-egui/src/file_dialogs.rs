@@ -129,7 +129,11 @@ impl WordApp {
             }
             AfterPick::Export { ext } => {
                 let Some(path) = picked else { return Ok(json!({"cancelled": true})) };
-                let r = if ext == "png" { self.run("file.exportPng", json!({"path": path})) } else { self.run("file.saveAs", json!({"path": path})) };
+                let r = if ext == "png" {
+                    self.run("file.exportPng", json!({"path": path}))
+                } else {
+                    self.run("file.export", json!({"path": path}))
+                };
                 if r.is_ok() {
                     self.status(crate::i18n::fmt(tl!("Exported {path}"), &[("path", &path)]));
                 }
@@ -337,6 +341,31 @@ mod tests {
         answer(&shown, None);
         assert_eq!(a.poll_file_dialog().unwrap().unwrap(), json!({"cancelled": true}));
         assert_eq!(a.session.merge.rows.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #168: Export dialog saves a copy without modifying active document's path or clearing dirty.
+    #[test]
+    fn export_copy_does_not_adopt_path_or_clear_dirty() {
+        let dir = scratch("export_copy");
+        let orig_path = dir.join("orig.docx");
+        let copy_path = dir.join("copy.odt");
+        let (mut a, shown) = async_app();
+        typed(&mut a);
+        a.run("file.save", json!({"path": orig_path.to_string_lossy()})).unwrap();
+        assert_eq!(a.session.path.as_ref(), Some(&orig_path));
+        assert!(!a.session.dirty);
+
+        typed(&mut a);
+        assert!(a.session.dirty);
+
+        a.export_dialog("odt");
+        answer(&shown, Some(&copy_path.to_string_lossy()));
+        a.poll_file_dialog().unwrap().unwrap();
+
+        assert_eq!(a.session.path.as_ref(), Some(&orig_path));
+        assert!(a.session.dirty);
+        assert!(saved_text(&copy_path).contains(UNSAVED));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

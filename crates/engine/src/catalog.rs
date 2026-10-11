@@ -18,6 +18,7 @@ File|Backstage|Info|file.info
 File|Backstage|Properties|file.properties
 File|Backstage|Export PDF|file.exportPdf
 File|Backstage|Export Image|file.exportPng
+File|Backstage|Export Copy|file.export
 File|Backstage|Options|file.options
 File|Backstage|Share|file.share
 File|Backstage|Protect Document|file.protect
