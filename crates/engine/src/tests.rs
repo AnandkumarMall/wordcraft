@@ -3856,3 +3856,12 @@ fn format_font_sets_the_asian_and_latin_fonts_separately() {
     assert_eq!(fonts(&s), before);
     assert!(s.run("format.font", &json!({})).is_err() && s.run("format.font", &json!({"eastAsia": " "})).is_err());
 }
+
+#[test]
+fn atomic_save_unique_temp_path() {
+    let p1 = std::path::Path::new("target/test_doc.docx");
+    let t1 = crate::io::unique_tmp_path(p1);
+    let t2 = crate::io::unique_tmp_path(p1);
+    assert_ne!(t1, t2, "consecutive temporary paths must be unique");
+    assert!(t1.to_string_lossy().contains(&std::process::id().to_string()), "must include process id");
+}

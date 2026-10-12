@@ -321,9 +321,24 @@ pub fn save_path(path: &std::path::Path, doc: &Document) -> Result<(), String> {
 pub fn save_path_with(path: &std::path::Path, doc: &Document, password: Option<&str>, opts: &ExportOptions) -> Result<(), String> {
     let bytes = save_bytes_with(&path.to_string_lossy(), doc, password, opts)?;
     // Write atomically: temp file next to the target, then rename.
-    let tmp = path.with_extension(format!("{}.tmp", ext_of(&path.to_string_lossy())));
+    // The temp name is unique (pid + monotonic counter) to avoid symlink
+    // race conditions that a predictable name like `doc.docx.tmp` allows.
+    let tmp = unique_tmp_path(path);
     std::fs::write(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A temp path next to `path` that is unique per process invocation.
+/// Uses the process id and a monotonically increasing counter so concurrent
+/// saves never collide.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn unique_tmp_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("doc");
+    let name = format!(".{stem}.{pid}.{n}.tmp", pid = std::process::id());
+    path.with_file_name(name)
 }
 
 #[cfg(target_arch = "wasm32")]
